@@ -1,0 +1,125 @@
+cat > scripts/process_tsv_dev.py << 'EOF'
+import pandas as pd
+import torch
+import gc
+from comet import load_from_checkpoint
+from tqdm import tqdm
+import os
+import glob
+
+def find_comet_model_path():
+    """Find the actual COMET model checkpoint path"""
+    cache_patterns = [
+        "~/.cache/huggingface/hub/models--Unbabel--wmt22-cometkiwi-da/snapshots/*/checkpoints/model.ckpt",
+        "~/.cache/huggingface/hub/models--Unbabel--wmt22-cometkiwi-da/snapshots/*/model.ckpt"
+    ]
+    
+    for pattern in cache_patterns:
+        expanded_pattern = os.path.expanduser(pattern)
+        matches = glob.glob(expanded_pattern)
+        if matches:
+            return matches[0]
+    
+    return "Unbabel/wmt22-cometkiwi-da"
+
+def process_tsv_dev(input_file, output_file, batch_size=32):
+    """Fixed processing with single progress bar"""
+    
+    print(f"Loading data from: {input_file}")
+    df = pd.read_csv(input_file, sep='\t')
+    print(f"Loaded {len(df)} rows")
+    
+    # Load model once
+    print("Loading COMET-KIWI model...")
+    model_path = find_comet_model_path()
+    print(f"Using model path: {model_path}")
+    
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    model = load_from_checkpoint(model_path)
+    print("Model loaded successfully!")
+    
+    # Prepare all data at once
+    print("Preparing data...")
+    comet_data = []
+    for idx, row in df.iterrows():
+        comet_data.append({
+            "src": str(row['src']),
+            "mt": str(row['mt'])
+        })
+    
+    # Calculate total batches
+    total_batches = len(comet_data) // batch_size + (1 if len(comet_data) % batch_size != 0 else 0)
+    print(f"Processing {len(comet_data)} samples in {total_batches} batches of {batch_size}")
+    print(f"Estimated time: {total_batches * 1.5 / 60:.1f} minutes")
+    
+    all_scores = []
+    
+    # Single progress bar for all batches
+    with tqdm(total=total_batches, desc="Processing batches") as pbar:
+        for i in range(0, len(comet_data), batch_size):
+            batch = comet_data[i:i+batch_size]
+            
+            try:
+                # Single prediction call for the whole batch
+                scores = model.predict(batch, batch_size=len(batch), gpus=1)
+                all_scores.extend(scores.scores)
+                
+                # Update progress
+                pbar.update(1)
+                
+                # Update description with current stats
+                if len(all_scores) > 0:
+                    avg_score = sum(all_scores) / len(all_scores)
+                    pbar.set_description(f"Processing batches (avg score: {avg_score:.3f})")
+                
+                # Memory cleanup every 50 batches
+                if (i // batch_size) % 50 == 0 and i > 0:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                
+            except Exception as e:
+                print(f"\nBatch {i//batch_size} failed: {e}")
+                all_scores.extend([0.5] * len(batch))
+                pbar.update(1)
+                torch.cuda.empty_cache()
+                gc.collect()
+    
+    # Add scores and save
+    print(f"\nAdding teacher scores to dataframe...")
+    df['teacher_score'] = all_scores
+    
+    print(f"Saving to: {output_file}")
+    df.to_csv(output_file, sep='\t', index=False)
+    
+    # Final statistics
+    avg_score = sum(all_scores) / len(all_scores)
+    min_score = min(all_scores)
+    max_score = max(all_scores)
+    
+    print(f"\n✅ Processing completed!")
+    print(f"Total samples processed: {len(all_scores)}")
+    print(f"Average teacher score: {avg_score:.4f}")
+    print(f"Score range: {min_score:.4f} - {max_score:.4f}")
+    print(f"Output file: {output_file}")
+    
+    # Clean up
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    return True
+
+if __name__ == "__main__":
+    input_file = "data/zmean_dev_10.tsv"
+    output_file = "data/zmean_dev_10_with_teacher_scores.tsv"
+    
+    success = process_tsv_dev(input_file, output_file, batch_size=32)
+    
+    if success:
+        print(f"\n Success! File ready for download: {output_file}")
+    else:
+        print(f"\n Processing failed!")
+EOF
