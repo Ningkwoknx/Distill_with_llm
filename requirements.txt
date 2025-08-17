@@ -1,0 +1,23 @@
+# Unsloth and fast training essentials
+unsloth
+bitsandbytes
+accelerate
+xformers==0.0.29.post3
+peft
+trl
+triton
+
+# Transformers and data handling
+transformers
+torch
+datasets>=3.4.1
+sentencepiece
+protobuf
+huggingface_hub
+hf_transfer
+
+# Data manipulation and metrics
+pandas
+numpy
+scikit-learn
+scipy
